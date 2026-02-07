@@ -74,7 +74,19 @@ fn parse_program(meta: &mut DefaultMetadata, stop_words: &[&str]) -> Result<Vec<
 }
 
 fn parse_statement(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
-    let mut node = parse_command_unit(meta)?;
+    let mut node = parse_and_or(meta)?;
+
+    if current_word(meta).as_deref() == Some("&") {
+        meta.increment_index();
+        consume_connector_separators(meta);
+        node = Command::Background(Box::new(node));
+    }
+
+    Ok(node)
+}
+
+fn parse_and_or(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
+    let mut node = parse_pipeline(meta)?;
 
     loop {
         let Some(word) = current_word(meta) else {
@@ -82,19 +94,44 @@ fn parse_statement(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
         };
 
         let connector = match word.as_str() {
-            "|" => Connector::Pipe,
             "&&" => Connector::And,
             "||" => Connector::Or,
             _ => break,
         };
 
         meta.increment_index();
-        consume_separators(meta);
+        consume_connector_separators(meta);
+
+        let right = parse_pipeline(meta)?;
+        node = Command::Connection(Connection {
+            left: Box::new(node),
+            op: connector,
+            right: Box::new(right),
+        });
+    }
+
+    Ok(node)
+}
+
+fn parse_pipeline(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
+    let mut node = parse_command_unit(meta)?;
+
+    loop {
+        let Some(word) = current_word(meta) else {
+            break;
+        };
+
+        if word != "|" {
+            break;
+        }
+
+        meta.increment_index();
+        consume_connector_separators(meta);
 
         let right = parse_command_unit(meta)?;
         node = Command::Connection(Connection {
             left: Box::new(node),
-            op: connector,
+            op: Connector::Pipe,
             right: Box::new(right),
         });
     }
@@ -115,13 +152,162 @@ fn parse_command_unit(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
         "function" => parse_function_keyword(meta),
         "{" => parse_group(meta),
         _ => {
-            if looks_like_function(meta) {
+            if looks_like_arithmetic_command_start(&word) {
+                parse_arithmetic(meta)
+            } else if looks_like_function(meta) {
                 parse_function_style(meta)
             } else {
                 parse_simple(meta)
             }
         }
     }
+}
+
+fn looks_like_arithmetic_command_start(word: &str) -> bool {
+    word == "((" || word.starts_with("((")
+}
+
+fn parse_arithmetic(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
+    let Some(first) = consume_word(meta) else {
+        return error!(meta, None, "Expected arithmetic command");
+    };
+
+    let first_chunk = if first == "((" {
+        ""
+    } else if let Some(rest) = first.strip_prefix("((") {
+        rest
+    } else {
+        return error!(meta, None, "Expected '((' in arithmetic command");
+    };
+
+    let mut expression = String::new();
+    let mut nested_parens = 0usize;
+    let mut closed = false;
+
+    consume_arithmetic_chunk(
+        meta,
+        first_chunk,
+        &mut expression,
+        &mut nested_parens,
+        &mut closed,
+    )?;
+
+    while !closed {
+        let Some(word) = consume_word(meta) else {
+            return error!(meta, None, "Unterminated arithmetic command");
+        };
+
+        consume_arithmetic_chunk(
+            meta,
+            &word,
+            &mut expression,
+            &mut nested_parens,
+            &mut closed,
+        )?;
+    }
+
+    if !closed {
+        return error!(meta, None, "Unterminated arithmetic command");
+    }
+
+    Ok(Command::Arithmetic(ArithmeticCommand {
+        expression: expression.trim().to_string(),
+    }))
+}
+
+fn consume_arithmetic_chunk(
+    meta: &mut DefaultMetadata,
+    chunk: &str,
+    expression: &mut String,
+    nested_parens: &mut usize,
+    closed: &mut bool,
+) -> Result<(), Failure> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+
+    let chars: Vec<char> = chunk.chars().collect();
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut current = String::new();
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        if ch == '\\' {
+            current.push(ch);
+            escaped = true;
+            i += 1;
+            continue;
+        }
+
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            current.push(ch);
+            i += 1;
+            continue;
+        }
+
+        if !in_single && !in_double {
+            if ch == '(' {
+                *nested_parens += 1;
+                current.push(ch);
+                i += 1;
+                continue;
+            }
+
+            if ch == ')' {
+                if i + 1 < chars.len() && chars[i + 1] == ')' && *nested_parens == 0 {
+                    append_arithmetic_segment(expression, current.trim());
+                    *closed = true;
+
+                    let trailing: String = chars[i + 2..].iter().collect();
+                    if !trailing.trim().is_empty() {
+                        return error!(meta, None, "Unexpected token after arithmetic close");
+                    }
+                    return Ok(());
+                }
+
+                *nested_parens = nested_parens.saturating_sub(1);
+                current.push(ch);
+                i += 1;
+                continue;
+            }
+        }
+
+        current.push(ch);
+        i += 1;
+    }
+
+    append_arithmetic_segment(expression, current.trim());
+    Ok(())
+}
+
+fn append_arithmetic_segment(expression: &mut String, segment: &str) {
+    if segment.is_empty() {
+        return;
+    }
+
+    if !expression.is_empty() {
+        expression.push(' ');
+    }
+    expression.push_str(segment);
 }
 
 fn parse_case(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
@@ -254,7 +440,7 @@ fn consume_case_statement_separators(meta: &mut DefaultMetadata) {
             return;
         };
 
-        if word == "\n" || is_comment(&word) || word == "&" {
+        if word == "\n" || is_comment(&word) {
             meta.increment_index();
             continue;
         }
@@ -607,9 +793,38 @@ fn parse_simple(meta: &mut DefaultMetadata) -> Result<Command, Failure> {
 fn update_command_substitution_depth(mut depth: usize, word: &str) -> usize {
     let chars: Vec<char> = word.chars().collect();
     let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
 
     while i < chars.len() {
-        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+        let ch = chars[i];
+
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        if ch == '\\' {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+
+        if !in_single && !in_double && ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
             let is_arithmetic = i + 2 < chars.len() && chars[i + 2] == '(';
             if !is_arithmetic {
                 depth = depth.saturating_add(1);
@@ -618,7 +833,7 @@ fn update_command_substitution_depth(mut depth: usize, word: &str) -> usize {
             }
         }
 
-        if chars[i] == ')' && depth > 0 {
+        if !in_single && !in_double && ch == ')' && depth > 0 {
             depth -= 1;
         }
 
@@ -666,6 +881,16 @@ fn consume_separators(meta: &mut DefaultMetadata) -> usize {
         }
     }
     consumed
+}
+
+fn consume_connector_separators(meta: &mut DefaultMetadata) {
+    while let Some(word) = current_word(meta) {
+        if word == "\n" || is_comment(&word) {
+            meta.increment_index();
+        } else {
+            break;
+        }
+    }
 }
 
 fn expect_word(meta: &mut DefaultMetadata, expected: &str) -> Result<(), Failure> {
@@ -726,7 +951,7 @@ fn is_identifier(text: &str) -> bool {
 }
 
 fn is_separator(word: &str) -> bool {
-    matches!(word, ";" | "\n" | "&")
+    matches!(word, ";" | "\n")
 }
 
 fn is_comment(word: &str) -> bool {
@@ -734,11 +959,7 @@ fn is_comment(word: &str) -> bool {
 }
 
 fn is_simple_stop(word: &str) -> bool {
-    is_separator(word)
-        || matches!(
-            word,
-            "|" | "&&" | "||" | "then" | "do" | "done" | "fi" | "else" | "elif" | "}" | "esac"
-        )
+    is_separator(word) || matches!(word, "|" | "&&" | "||" | "&")
 }
 
 fn lexer_error_to_string(kind: LexerErrorType, pos: PositionInfo, source: &str) -> String {
@@ -774,5 +995,68 @@ fn failure_to_string(failure: Failure, source: &str) -> String {
             let (line, col) = pos.get_pos_by_code(source);
             format!("Parse error at {line}:{col}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_simple_words(command: &Command, expected: &[&str]) {
+        match command {
+            Command::Simple(simple) => {
+                let expected_words = expected
+                    .iter()
+                    .map(|word| word.to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(simple.words, expected_words);
+            }
+            _ => panic!("expected simple command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_simple_command_with_keyword_as_argument() {
+        let program = parse("echo done\n", None).expect("script should parse");
+        assert_eq!(program.statements.len(), 1);
+        assert_simple_words(&program.statements[0], &["echo", "done"]);
+    }
+
+    #[test]
+    fn parses_background_statement_separator() {
+        let program = parse("echo a & echo b\n", None).expect("script should parse");
+        assert_eq!(program.statements.len(), 2);
+
+        match &program.statements[0] {
+            Command::Background(inner) => assert_simple_words(inner, &["echo", "a"]),
+            _ => panic!(
+                "expected background command, got {:?}",
+                program.statements[0]
+            ),
+        }
+
+        assert_simple_words(&program.statements[1], &["echo", "b"]);
+    }
+
+    #[test]
+    fn gives_pipeline_higher_precedence_than_or() {
+        let program = parse("a || b | c\n", None).expect("script should parse");
+        assert_eq!(program.statements.len(), 1);
+
+        let Command::Connection(or_connection) = &program.statements[0] else {
+            panic!("expected OR connection, got {:?}", program.statements[0]);
+        };
+        assert_eq!(or_connection.op, Connector::Or);
+        assert_simple_words(&or_connection.left, &["a"]);
+
+        let Command::Connection(pipe_connection) = or_connection.right.as_ref() else {
+            panic!(
+                "expected pipeline on OR right side, got {:?}",
+                or_connection.right
+            );
+        };
+        assert_eq!(pipe_connection.op, Connector::Pipe);
+        assert_simple_words(&pipe_connection.left, &["b"]);
+        assert_simple_words(&pipe_connection.right, &["c"]);
     }
 }

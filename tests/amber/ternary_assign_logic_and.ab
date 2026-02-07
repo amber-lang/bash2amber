@@ -1,0 +1,5 @@
+let left = 1
+let right = 2
+let result = ""
+result = (left < right) and (right > 1) then "yes" else "no"
+echo(result)

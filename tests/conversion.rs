@@ -7,7 +7,7 @@ use bash2amber::convert_bash_to_amber;
 use test_generator::test_resources;
 
 static RUN_ID: AtomicU64 = AtomicU64::new(1);
-// Keep this file changing when fixtures are added so test-generator re-expands glob inputs. (updated for function_local_statement_fallback)
+// Keep this file changing when fixtures are added so test-generator re-expands glob inputs. (updated for render_regressions_2026_02_07)
 
 #[test_resources("tests/bash/*.sh")]
 fn converts_fixture(resource: &str) {
@@ -50,8 +50,8 @@ fn expected_path_for(resource: &str) -> PathBuf {
 fn assert_same_runtime_output(resource: &str, amber_source: &str) {
     let bash_result = run_bash_script(Path::new(resource));
     let amber_result = run_generated_amber_script(resource, amber_source);
-    let bash_stdout = normalize_fixture_stdout(resource, &bash_result.stdout);
-    let amber_stdout = normalize_fixture_stdout(resource, &amber_result.stdout);
+    let bash_stdout = bash_result.stdout.clone();
+    let amber_stdout = amber_result.stdout.clone();
     let bash_stderr = normalize_stderr(&bash_result.stderr);
     let amber_stderr = normalize_stderr(&amber_result.stderr);
 
@@ -177,22 +177,6 @@ fn normalize_stderr_line(line: &str) -> String {
         }
     }
     line.to_string()
-}
-
-fn normalize_fixture_stdout(resource: &str, stdout: &str) -> String {
-    if resource.ends_with("/for_array.sh") || resource.ends_with("\\for_array.sh") {
-        let mut normalized_lines = Vec::new();
-        for line in stdout.lines() {
-            normalized_lines.push(line.trim_end_matches(',').to_string());
-        }
-        if normalized_lines.is_empty() {
-            String::new()
-        } else {
-            normalized_lines.join("\n") + "\n"
-        }
-    } else {
-        stdout.to_string()
-    }
 }
 
 fn should_compare_runtime_output(source: &str) -> bool {

@@ -3,6 +3,9 @@ name = "bash2amber"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+doctest = false
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 heraclitus-compiler = "1.9.0"

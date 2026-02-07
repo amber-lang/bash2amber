@@ -1,0 +1,26 @@
+let a = 10
+let b = 5
+if a > 5 and b < 10 {
+    echo("and_true")
+}
+if a == 10 {
+    echo("eq_true")
+}
+if a != 10 {
+    echo("ne_true")
+} else {
+    echo("ne_false")
+}
+if a >= b {
+    echo("ge_true")
+}
+if a <= b {
+    echo("le_true")
+} else {
+    echo("le_false")
+}
+if not 1 {
+    echo("not_true")
+} else {
+    echo("not_false")
+}

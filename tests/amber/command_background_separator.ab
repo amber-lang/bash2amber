@@ -1,0 +1,2 @@
+trust $ echo alpha & $
+trust $ wait $

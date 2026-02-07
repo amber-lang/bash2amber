@@ -1,0 +1,6 @@
+let state = "failed"
+if state != "ok" {
+    echo("retry")
+} else {
+    echo("done")
+}

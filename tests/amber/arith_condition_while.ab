@@ -1,0 +1,5 @@
+let count = 0
+while count < 3 {
+    echo(count)
+    count = count + 1
+}

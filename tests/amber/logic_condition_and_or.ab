@@ -1,0 +1,7 @@
+let a = 2
+let b = 5
+if ((a < b) and (b > 0)) or (a == 0) {
+    echo("true")
+} else {
+    echo("false")
+}

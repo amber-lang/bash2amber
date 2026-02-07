@@ -3,12 +3,19 @@ mod expr;
 mod fallback;
 mod syntax;
 
+use crate::amber::fragments::{
+    BlockFragment, ForFragment, FragmentKind, FragmentRenderable, Fragments, FunctionFragment,
+    IfChainBranch, IfChainFragment, IfFragment, InterpolableFragment, ListFragment, RawFragment,
+    TranslateMetadata, VarExprFragment, VarStmtFragment, WhileFragment,
+};
 use crate::bash::ast::*;
+use crate::bash::parser;
 
 use context::RenderContext;
 use expr::{
-    has_unresolved_shell_var, parse_assignment, parse_variable_reference, render_condition_expr,
-    render_for_items, render_simple_function_call_expr, word_to_expr,
+    has_unresolved_shell_var, parse_assignment, parse_variable_reference,
+    render_arithmetic_statement_expr, render_condition_expr, render_for_items,
+    render_simple_function_call_expr, word_to_expr,
 };
 use fallback::command_literal_from_command;
 use syntax::{
@@ -17,75 +24,108 @@ use syntax::{
 };
 
 pub fn render_program(program: &Program) -> String {
-    let mut lines = Vec::new();
     let mut ctx = RenderContext::new();
-    render_commands(&program.statements, 0, &mut ctx, &mut lines, false);
+    let items = render_commands(&program.statements, &mut ctx, false);
 
-    let mut output = lines.join("\n");
-    output.push('\n');
-    output
+    let fragments = Fragments {
+        fragment: FragmentKind::block(items),
+    };
+    fragments.to_string(&mut TranslateMetadata::default())
 }
 
 fn render_commands(
     commands: &[Command],
-    indent: usize,
     ctx: &mut RenderContext,
-    output: &mut Vec<String>,
     return_tail: bool,
-) {
+) -> Vec<FragmentKind> {
+    preregister_function_signatures(commands, ctx);
+
+    let mut fragments = Vec::new();
     for (index, command) in commands.iter().enumerate() {
         let tail_return = return_tail && index + 1 == commands.len();
-        render_command(command, indent, ctx, output, tail_return);
+        fragments.extend(render_command(command, ctx, tail_return));
+    }
+    fragments
+}
+
+fn preregister_function_signatures(commands: &[Command], ctx: &mut RenderContext) {
+    for command in commands {
+        let Command::Function(function) = command else {
+            continue;
+        };
+
+        let amber_name = sanitize_function_name(&function.name);
+        let arity = detect_function_arity(&function.body);
+        let positional_bindings = infer_positional_bindings_prefix(&function.body, arity);
+        let function_body = &function.body[positional_bindings.len()..];
+        let return_mode = function_requires_value_return(function_body, &function.name);
+
+        ctx.register_function(&function.name, amber_name, arity, return_mode);
     }
 }
 
 fn render_command(
     command: &Command,
-    indent: usize,
     ctx: &mut RenderContext,
-    output: &mut Vec<String>,
     tail_return: bool,
-) {
-    let pad = "    ".repeat(indent);
+) -> Vec<FragmentKind> {
     match command {
         Command::If(if_cmd) => {
             if let Some(ternary_assignment) = render_if_ternary_assignment(if_cmd, ctx) {
-                output.push(format!("{pad}{ternary_assignment}"));
-                return;
+                return vec![
+                    RawFragment {
+                        value: ternary_assignment,
+                    }
+                    .to_frag(),
+                ];
             }
 
             let condition = render_condition_expr(&if_cmd.condition, ctx)
                 .unwrap_or_else(|| command_literal_from_command(&if_cmd.condition, ctx));
 
-            output.push(format!("{pad}if {condition} {{"));
             let mut then_ctx = ctx.with_child_scope();
-            render_commands(
-                &if_cmd.then_body,
-                indent + 1,
-                &mut then_ctx,
-                output,
-                tail_return,
+            let then_body = BlockFragment::new(
+                render_commands(&if_cmd.then_body, &mut then_ctx, tail_return),
+                true,
             );
 
-            if let Some(else_body) = &if_cmd.else_body {
-                output.push(format!("{pad}}} else {{"));
+            let else_body = if let Some(else_body) = &if_cmd.else_body {
                 let mut else_ctx = ctx.with_child_scope();
-                render_commands(else_body, indent + 1, &mut else_ctx, output, tail_return);
+                let rendered = BlockFragment::new(
+                    render_commands(else_body, &mut else_ctx, tail_return),
+                    true,
+                );
                 ctx.merge_from_child(else_ctx);
-            }
+                Some(rendered)
+            } else {
+                None
+            };
 
-            output.push(format!("{pad}}}"));
             ctx.merge_from_child(then_ctx);
+            vec![
+                IfFragment {
+                    condition: Box::new(render_expression_fragment(&condition)),
+                    then_body,
+                    else_body,
+                }
+                .to_frag(),
+            ]
         }
         Command::While(while_cmd) => {
             let condition = render_condition_expr(&while_cmd.condition, ctx)
                 .unwrap_or_else(|| command_literal_from_command(&while_cmd.condition, ctx));
 
-            output.push(format!("{pad}while {condition} {{"));
             let mut loop_ctx = ctx.with_child_scope();
-            render_commands(&while_cmd.body, indent + 1, &mut loop_ctx, output, false);
-            output.push(format!("{pad}}}"));
+            let body =
+                BlockFragment::new(render_commands(&while_cmd.body, &mut loop_ctx, false), true);
             ctx.merge_from_child(loop_ctx);
+            vec![
+                WhileFragment {
+                    condition: Box::new(render_expression_fragment(&condition)),
+                    body,
+                }
+                .to_frag(),
+            ]
         }
         Command::For(for_cmd) => {
             let items = render_for_items(&for_cmd.items, ctx).unwrap_or_else(|| {
@@ -96,74 +136,103 @@ fn render_command(
             });
 
             let var_name = ctx.declare_var(&for_cmd.variable);
-            output.push(format!("{pad}for {var_name} in {items} {{"));
 
             let mut loop_ctx = ctx.with_child_scope();
             loop_ctx.declare_var(&for_cmd.variable);
-            render_commands(&for_cmd.body, indent + 1, &mut loop_ctx, output, false);
-
-            output.push(format!("{pad}}}"));
+            let body =
+                BlockFragment::new(render_commands(&for_cmd.body, &mut loop_ctx, false), true);
             ctx.merge_from_child(loop_ctx);
+
+            vec![
+                ForFragment {
+                    variable: var_name,
+                    items,
+                    body,
+                }
+                .to_frag(),
+            ]
         }
         Command::CStyleFor(for_cmd) => {
             if let Some(spec) = parse_c_style_for_range(for_cmd, ctx) {
                 let var_name = ctx.declare_var(&spec.variable);
                 let range_op = if spec.inclusive { "..=" } else { ".." };
-                output.push(format!(
-                    "{pad}for {var_name} in {}{range_op}{} {{",
-                    spec.start, spec.end
-                ));
+                let items = format!("{}{range_op}{}", spec.start, spec.end);
 
                 let mut loop_ctx = ctx.with_child_scope();
                 loop_ctx.declare_var(&spec.variable);
-                render_commands(&for_cmd.body, indent + 1, &mut loop_ctx, output, false);
-
-                output.push(format!("{pad}}}"));
+                let body =
+                    BlockFragment::new(render_commands(&for_cmd.body, &mut loop_ctx, false), true);
                 ctx.merge_from_child(loop_ctx);
+
+                vec![
+                    ForFragment {
+                        variable: var_name,
+                        items,
+                        body,
+                    }
+                    .to_frag(),
+                ]
             } else {
-                output.push(format!(
-                    "{pad}{}",
-                    command_literal_from_command(command, ctx)
-                ));
+                vec![
+                    RawFragment {
+                        value: command_literal_from_command(command, ctx),
+                    }
+                    .to_frag(),
+                ]
             }
         }
-        Command::Case(case_cmd) => {
-            render_case(case_cmd, indent, ctx, output, tail_return);
+        Command::Arithmetic(arith) => {
+            if let Some(rendered) = render_arithmetic_statement_expr(&arith.expression, ctx) {
+                vec![RawFragment { value: rendered }.to_frag()]
+            } else {
+                vec![
+                    RawFragment {
+                        value: command_literal_from_command(command, ctx),
+                    }
+                    .to_frag(),
+                ]
+            }
         }
-        Command::Function(function) => {
-            render_function(function, indent, ctx, output);
-        }
-        Command::Group(body) => {
-            render_commands(body, indent, ctx, output, tail_return);
-        }
+        Command::Background(_) => vec![
+            RawFragment {
+                value: command_literal_from_command(command, ctx),
+            }
+            .to_frag(),
+        ],
+        Command::Case(case_cmd) => vec![render_case(case_cmd, ctx, tail_return)],
+        Command::Function(function) => vec![render_function(function, ctx)],
+        Command::Group(body) => render_commands(body, ctx, tail_return),
         Command::Simple(simple) => {
             if tail_return && let Some(expr) = render_tail_return_expr(simple, ctx) {
-                output.push(format!("{pad}let result = {expr}"));
-                output.push(format!("{pad}return result"));
-            } else {
-                output.push(format!("{pad}{}", render_simple(simple, ctx)));
+                return vec![
+                    RawFragment {
+                        value: format!("let result = {expr}"),
+                    }
+                    .to_frag(),
+                    RawFragment {
+                        value: "return result".to_string(),
+                    }
+                    .to_frag(),
+                ];
             }
+            vec![render_simple(simple, ctx)]
         }
         Command::Connection(connection) => {
             if let Some(rendered) = render_echo_ternary_connection(connection, ctx) {
-                output.push(format!("{pad}{rendered}"));
+                vec![RawFragment { value: rendered }.to_frag()]
             } else {
-                output.push(format!(
-                    "{pad}{}",
-                    command_literal_from_command(command, ctx)
-                ));
+                vec![
+                    RawFragment {
+                        value: command_literal_from_command(command, ctx),
+                    }
+                    .to_frag(),
+                ]
             }
         }
     }
 }
 
-fn render_function(
-    function: &FunctionDef,
-    indent: usize,
-    ctx: &mut RenderContext,
-    output: &mut Vec<String>,
-) {
-    let pad = "    ".repeat(indent);
+fn render_function(function: &FunctionDef, ctx: &mut RenderContext) -> FragmentKind {
     let fun_name = sanitize_function_name(&function.name);
     let arity = detect_function_arity(&function.body);
     let positional_bindings = infer_positional_bindings_prefix(&function.body, arity);
@@ -172,20 +241,14 @@ fn render_function(
     let return_mode = function_requires_value_return(function_body, &function.name);
 
     ctx.register_function(&function.name, fun_name.clone(), arity, return_mode);
-    let params_rendered = if return_mode {
+    let rendered_params = if return_mode {
         params
             .iter()
             .map(|param| format!("{param}: Num"))
             .collect::<Vec<String>>()
-            .join(", ")
     } else {
-        params.join(", ")
+        params.clone()
     };
-    if return_mode {
-        output.push(format!("{pad}fun {fun_name}({params_rendered}): Num {{"));
-    } else {
-        output.push(format!("{pad}fun {fun_name}({params_rendered}) {{"));
-    }
 
     let mut fn_ctx = ctx.with_child_scope();
     fn_ctx.push_positional_scope_with_names(&params);
@@ -194,10 +257,19 @@ fn render_function(
             fn_ctx.bind_var_alias(raw_name, alias);
         }
     }
-    render_commands(function_body, indent + 1, &mut fn_ctx, output, return_mode);
+    let body = BlockFragment::new(
+        render_commands(function_body, &mut fn_ctx, return_mode),
+        true,
+    );
     fn_ctx.pop_positional_scope();
 
-    output.push(format!("{pad}}}"));
+    FunctionFragment {
+        name: fun_name,
+        params: rendered_params,
+        return_type: return_mode.then(|| "Num".to_string()),
+        body,
+    }
+    .to_frag()
 }
 
 #[derive(Debug)]
@@ -287,7 +359,7 @@ fn parse_c_style_bound_expr(raw: &str, ctx: &RenderContext) -> Option<String> {
         if let Some(alias) = ctx.resolve_var(raw) {
             return Some(alias);
         }
-        return parse_variable_reference(raw, ctx).or_else(|| Some(raw.to_string()));
+        return parse_variable_reference(raw, ctx);
     }
 
     None
@@ -405,9 +477,23 @@ fn command_contains_self_call(command: &Command, raw_function_name: &str) -> boo
             {
                 return true;
             }
-            let marker = format!("$({raw_function_name}");
-            simple.words.iter().any(|word| word.contains(&marker))
+
+            let merged = simple.words.join(" ");
+            extract_command_substitutions(&merged).iter().any(|body| {
+                if let Ok(parsed) = parser::parse(body.trim(), None) {
+                    parsed
+                        .statements
+                        .iter()
+                        .any(|stmt| command_contains_self_call(stmt, raw_function_name))
+                } else {
+                    body.split_whitespace()
+                        .next()
+                        .is_some_and(|name| name == raw_function_name)
+                }
+            })
         }
+        Command::Arithmetic(_) => false,
+        Command::Background(inner) => command_contains_self_call(inner, raw_function_name),
         Command::Connection(connection) => {
             command_contains_self_call(&connection.left, raw_function_name)
                 || command_contains_self_call(&connection.right, raw_function_name)
@@ -440,6 +526,83 @@ fn command_contains_self_call(command: &Command, raw_function_name: &str) -> boo
     }
 }
 
+fn extract_command_substitutions(word: &str) -> Vec<String> {
+    let chars: Vec<char> = word.chars().collect();
+    let mut substitutions = Vec::new();
+    let mut i = 0usize;
+
+    while i + 1 < chars.len() {
+        if chars[i] == '$' && chars[i + 1] == '(' {
+            let start = i + 2;
+            let Some(end) = find_command_substitution_end(&chars, start) else {
+                break;
+            };
+            substitutions.push(chars[start..end].iter().collect());
+            i = end + 1;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    substitutions
+}
+
+fn find_command_substitution_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut i = start;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+
+        if ch == '\\' && !in_single {
+            escaped = true;
+            i += 1;
+            continue;
+        }
+
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+
+        if !in_single && !in_double {
+            if ch == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
+                depth += 1;
+                i += 2;
+                continue;
+            }
+
+            if ch == ')' {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
 fn render_tail_return_expr(simple: &SimpleCommand, ctx: &mut RenderContext) -> Option<String> {
     if simple.words.first().is_some_and(|word| word == "echo") {
         if simple.words.len() == 1 {
@@ -456,7 +619,7 @@ fn render_tail_return_expr(simple: &SimpleCommand, ctx: &mut RenderContext) -> O
         return None;
     }
 
-    render_function_call(simple, ctx)
+    render_simple_function_call_expr(simple, ctx)
 }
 
 fn render_if_ternary_assignment(if_cmd: &IfCommand, ctx: &mut RenderContext) -> Option<String> {
@@ -510,20 +673,16 @@ fn render_if_ternary_assignment(if_cmd: &IfCommand, ctx: &mut RenderContext) -> 
     ))
 }
 
-fn render_case(
-    case_cmd: &CaseCommand,
-    indent: usize,
-    ctx: &mut RenderContext,
-    output: &mut Vec<String>,
-    return_tail: bool,
-) {
-    let pad = "    ".repeat(indent);
+fn case_fallback(case_cmd: &CaseCommand, ctx: &RenderContext) -> FragmentKind {
+    RawFragment {
+        value: command_literal_from_command(&Command::Case(case_cmd.clone()), ctx),
+    }
+    .to_frag()
+}
+
+fn render_case(case_cmd: &CaseCommand, ctx: &mut RenderContext, return_tail: bool) -> FragmentKind {
     let Some(subject) = word_to_expr(&case_cmd.word, ctx) else {
-        output.push(format!(
-            "{pad}{}",
-            command_literal_from_command(&Command::Case(case_cmd.clone()), ctx)
-        ));
-        return;
+        return case_fallback(case_cmd, ctx);
     };
 
     let mut rendered_clauses = Vec::new();
@@ -534,27 +693,15 @@ fn render_case(
             clause.terminator,
             CaseClauseTerminator::Break | CaseClauseTerminator::End
         ) {
-            output.push(format!(
-                "{pad}{}",
-                command_literal_from_command(&Command::Case(case_cmd.clone()), ctx)
-            ));
-            return;
+            return case_fallback(case_cmd, ctx);
         }
 
         if clause.patterns.len() == 1 && clause.patterns[0] == "*" {
             if index + 1 != case_cmd.clauses.len() {
-                output.push(format!(
-                    "{pad}{}",
-                    command_literal_from_command(&Command::Case(case_cmd.clone()), ctx)
-                ));
-                return;
+                return case_fallback(case_cmd, ctx);
             }
             if rendered_else.is_some() {
-                output.push(format!(
-                    "{pad}{}",
-                    command_literal_from_command(&Command::Case(case_cmd.clone()), ctx)
-                ));
-                return;
+                return case_fallback(case_cmd, ctx);
             }
             rendered_else = Some(clause);
             continue;
@@ -563,65 +710,54 @@ fn render_case(
         let mut conditions = Vec::new();
         for pattern in &clause.patterns {
             let Some(condition) = render_case_pattern_condition(&subject, pattern, ctx) else {
-                output.push(format!(
-                    "{pad}{}",
-                    command_literal_from_command(&Command::Case(case_cmd.clone()), ctx)
-                ));
-                return;
+                return case_fallback(case_cmd, ctx);
             };
             conditions.push(condition);
         }
 
         if conditions.is_empty() {
-            output.push(format!(
-                "{pad}{}",
-                command_literal_from_command(&Command::Case(case_cmd.clone()), ctx)
-            ));
-            return;
+            return case_fallback(case_cmd, ctx);
         }
 
         rendered_clauses.push((conditions.join(" or "), clause));
     }
 
     if rendered_clauses.is_empty() && rendered_else.is_none() {
-        output.push(format!(
-            "{pad}{}",
-            command_literal_from_command(&Command::Case(case_cmd.clone()), ctx)
-        ));
-        return;
+        return case_fallback(case_cmd, ctx);
     }
 
-    output.push(format!("{pad}if {{"));
+    let mut branches = Vec::new();
 
     for (condition, clause) in rendered_clauses {
-        output.push(format!("{pad}    {condition} {{"));
         let mut clause_ctx = ctx.with_child_scope();
-        render_commands(
-            &clause.body,
-            indent + 2,
-            &mut clause_ctx,
-            output,
-            return_tail,
+        let body = BlockFragment::new(
+            render_commands(&clause.body, &mut clause_ctx, return_tail),
+            true,
         );
-        output.push(format!("{pad}    }}"));
         ctx.merge_from_child(clause_ctx);
+        branches.push(IfChainBranch {
+            condition: Box::new(render_expression_fragment(&condition)),
+            body,
+        });
     }
 
-    if let Some(clause) = rendered_else {
-        output.push(format!("{pad}    else {{"));
+    let else_body = if let Some(clause) = rendered_else {
         let mut clause_ctx = ctx.with_child_scope();
-        render_commands(
-            &clause.body,
-            indent + 2,
-            &mut clause_ctx,
-            output,
-            return_tail,
+        let body = BlockFragment::new(
+            render_commands(&clause.body, &mut clause_ctx, return_tail),
+            true,
         );
-        output.push(format!("{pad}    }}"));
         ctx.merge_from_child(clause_ctx);
-    }
+        Some(body)
+    } else {
+        None
+    };
 
-    output.push(format!("{pad}}}"));
+    IfChainFragment {
+        branches,
+        else_body,
+    }
+    .to_frag()
 }
 
 fn render_case_pattern_condition(
@@ -648,31 +784,39 @@ fn render_case_pattern_condition(
     Some(format!("{subject} == {rhs}"))
 }
 
-fn render_simple(simple: &SimpleCommand, ctx: &mut RenderContext) -> String {
+fn render_simple(simple: &SimpleCommand, ctx: &mut RenderContext) -> FragmentKind {
     if let Some(assignment) = parse_assignment(simple, ctx) {
-        if assignment.is_reassignment {
-            return format!("{} = {}", assignment.name, assignment.value);
+        return VarStmtFragment {
+            name: assignment.name,
+            value: Box::new(render_expression_fragment(&assignment.value)),
+            is_reassignment: assignment.is_reassignment,
         }
-        return format!("let {} = {}", assignment.name, assignment.value);
+        .to_frag();
     }
 
     if let Some(printf_v) = render_printf_v(simple, ctx) {
-        return printf_v;
+        return RawFragment { value: printf_v }.to_frag();
     }
 
     if let Some(call) = render_function_call_statement(simple, ctx) {
-        return call;
+        return RawFragment { value: call }.to_frag();
     }
 
     if simple.words.first().is_some_and(|word| word == "echo") {
         if simple.words.len() == 1 {
-            return "echo(\"\")".to_string();
+            return RawFragment {
+                value: "echo(\"\")".to_string(),
+            }
+            .to_frag();
         }
 
         if simple.words.len() == 2
             && let Some(expr) = word_to_expr(&simple.words[1], ctx)
         {
-            return format!("echo({expr})");
+            return RawFragment {
+                value: format!("echo({expr})"),
+            }
+            .to_frag();
         }
 
         if simple.words.len() > 2 {
@@ -682,12 +826,262 @@ fn render_simple(simple: &SimpleCommand, ctx: &mut RenderContext) -> String {
                 && merged_trimmed.ends_with("))")
                 && let Some(expr) = word_to_expr(merged_trimmed, ctx)
             {
-                return format!("echo({expr})");
+                return RawFragment {
+                    value: format!("echo({expr})"),
+                }
+                .to_frag();
             }
         }
     }
 
-    command_literal_from_command(&Command::Simple(simple.clone()), ctx)
+    RawFragment {
+        value: command_literal_from_command(&Command::Simple(simple.clone()), ctx),
+    }
+    .to_frag()
+}
+
+fn render_expression_fragment(value: &str) -> FragmentKind {
+    if let Some(parts) = split_plus_expression(value) {
+        let mut items = Vec::new();
+        for (index, part) in parts.into_iter().enumerate() {
+            if index > 0 {
+                items.push(
+                    RawFragment {
+                        value: "+".to_string(),
+                    }
+                    .to_frag(),
+                );
+            }
+            items.push(render_value_atom_fragment(&part));
+        }
+        return ListFragment { items }.to_frag();
+    }
+
+    let tokens = tokenize_expression_by_whitespace(value);
+    if tokens.len() > 1 {
+        let items = tokens
+            .into_iter()
+            .map(|token| render_expression_token_fragment(&token))
+            .collect::<Vec<FragmentKind>>();
+        return ListFragment { items }.to_frag();
+    }
+
+    render_value_atom_fragment(value)
+}
+
+fn render_value_atom_fragment(value: &str) -> FragmentKind {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return RawFragment {
+            value: "\"\"".to_string(),
+        }
+        .to_frag();
+    }
+
+    if is_double_quoted(trimmed) {
+        return parse_interpolable_literal(trimmed).to_frag();
+    }
+
+    if is_identifier(trimmed) {
+        if is_expression_keyword(trimmed) {
+            return RawFragment {
+                value: trimmed.to_string(),
+            }
+            .to_frag();
+        }
+        return VarExprFragment {
+            name: trimmed.to_string(),
+        }
+        .to_frag();
+    }
+
+    RawFragment {
+        value: trimmed.to_string(),
+    }
+    .to_frag()
+}
+
+fn render_expression_token_fragment(token: &str) -> FragmentKind {
+    if is_expression_operator(token) || is_expression_keyword(token) {
+        return RawFragment {
+            value: token.to_string(),
+        }
+        .to_frag();
+    }
+
+    render_value_atom_fragment(token)
+}
+
+fn tokenize_expression_by_whitespace(value: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for ch in value.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            current.push(ch);
+            escaped = true;
+            continue;
+        }
+
+        if !in_double && ch == '\'' {
+            in_single = !in_single;
+            current.push(ch);
+            continue;
+        }
+
+        if !in_single && ch == '"' {
+            in_double = !in_double;
+            current.push(ch);
+            continue;
+        }
+
+        if !in_single && !in_double && ch.is_whitespace() {
+            if !current.is_empty() {
+                tokens.push(current.trim().to_string());
+                current.clear();
+            }
+            continue;
+        }
+
+        current.push(ch);
+    }
+
+    if !current.trim().is_empty() {
+        tokens.push(current.trim().to_string());
+    }
+
+    tokens
+}
+
+fn is_expression_operator(token: &str) -> bool {
+    matches!(
+        token,
+        "+" | "-" | "*" | "/" | "%" | "==" | "!=" | "<" | "<=" | ">" | ">=" | ".." | "..="
+    )
+}
+
+fn is_expression_keyword(token: &str) -> bool {
+    matches!(token, "and" | "or" | "then" | "else" | "not")
+}
+
+fn split_plus_expression(value: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+
+    for ch in value.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        if ch == '\\' {
+            current.push(ch);
+            escaped = true;
+            continue;
+        }
+
+        if !in_double && ch == '\'' {
+            in_single = !in_single;
+            current.push(ch);
+            continue;
+        }
+
+        if !in_single && ch == '"' {
+            in_double = !in_double;
+            current.push(ch);
+            continue;
+        }
+
+        if !in_single && !in_double {
+            match ch {
+                '(' => paren += 1,
+                ')' => paren = paren.saturating_sub(1),
+                '[' => bracket += 1,
+                ']' => bracket = bracket.saturating_sub(1),
+                '{' => brace += 1,
+                '}' => brace = brace.saturating_sub(1),
+                '+' if paren == 0 && bracket == 0 && brace == 0 => {
+                    let part = current.trim();
+                    if part.is_empty() {
+                        return None;
+                    }
+                    parts.push(part.to_string());
+                    current.clear();
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        current.push(ch);
+    }
+
+    let tail = current.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    parts.push(tail.to_string());
+
+    (parts.len() > 1).then_some(parts)
+}
+
+fn parse_interpolable_literal(value: &str) -> InterpolableFragment {
+    let mut inner = value;
+    if is_double_quoted(value) {
+        inner = &value[1..value.len() - 1];
+    }
+
+    let mut strings = Vec::new();
+    let mut interpolations = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(open_relative) = inner[cursor..].find('{') {
+        let open = cursor + open_relative;
+        let Some(close_relative) = inner[open + 1..].find('}') else {
+            break;
+        };
+        let close = open + 1 + close_relative;
+
+        strings.push(inner[cursor..open].to_string());
+        interpolations.push(inner[open + 1..close].to_string());
+        cursor = close + 1;
+    }
+
+    if interpolations.is_empty() {
+        return InterpolableFragment {
+            strings: vec![value.to_string()],
+            interpolations: Vec::new(),
+        };
+    }
+
+    strings.push(inner[cursor..].to_string());
+    if let Some(first) = strings.first_mut() {
+        first.insert(0, '"');
+    }
+    if let Some(last) = strings.last_mut() {
+        last.push('"');
+    }
+
+    InterpolableFragment {
+        strings,
+        interpolations,
+    }
 }
 
 fn render_printf_v(simple: &SimpleCommand, ctx: &mut RenderContext) -> Option<String> {
@@ -724,14 +1118,10 @@ fn render_printf_v(simple: &SimpleCommand, ctx: &mut RenderContext) -> Option<St
     ))
 }
 
-fn render_function_call(simple: &SimpleCommand, ctx: &RenderContext) -> Option<String> {
-    render_simple_function_call_expr(simple, ctx)
-}
-
 fn render_function_call_statement(simple: &SimpleCommand, ctx: &RenderContext) -> Option<String> {
     let function_name = simple.words.first()?;
     let sig = ctx.resolve_function(function_name)?;
-    let expr = render_function_call(simple, ctx)?;
+    let expr = render_simple_function_call_expr(simple, ctx)?;
     if sig.returns_value {
         Some(format!("echo({expr})"))
     } else {

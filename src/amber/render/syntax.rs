@@ -76,6 +76,8 @@ fn detect_command_arity(command: &Command) -> usize {
             .map(|word| max_positional_reference(word))
             .max()
             .unwrap_or(0),
+        Command::Arithmetic(arith) => max_positional_reference(&arith.expression),
+        Command::Background(inner) => detect_command_arity(inner),
         Command::Connection(connection) => {
             detect_command_arity(&connection.left).max(detect_command_arity(&connection.right))
         }

@@ -41,7 +41,7 @@ impl RenderContext {
         let base = candidate.clone();
         let mut index = 2usize;
         while self.declared_vars.contains(&candidate)
-            && self.var_aliases.values().all(|name| name != &candidate)
+            || self.var_aliases.values().any(|name| name == &candidate)
         {
             candidate = format!("{base}_{index}");
             index += 1;

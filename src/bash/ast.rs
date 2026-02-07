@@ -6,7 +6,9 @@ pub struct Program {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Simple(SimpleCommand),
+    Background(Box<Command>),
     Connection(Connection),
+    Arithmetic(ArithmeticCommand),
     If(IfCommand),
     While(WhileCommand),
     For(ForCommand),
@@ -26,6 +28,11 @@ pub struct Connection {
     pub left: Box<Command>,
     pub op: Connector,
     pub right: Box<Command>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArithmeticCommand {
+    pub expression: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

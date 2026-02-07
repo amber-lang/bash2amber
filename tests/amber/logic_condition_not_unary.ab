@@ -1,0 +1,6 @@
+let value = 0
+if not value {
+    echo("zero")
+} else {
+    echo("nonzero")
+}

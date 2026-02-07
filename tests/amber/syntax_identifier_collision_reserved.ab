@@ -1,0 +1,3 @@
+let if_var = 1
+let if_var_2 = 2
+echo("{if_var} {if_var_2}")

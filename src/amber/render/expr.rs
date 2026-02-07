@@ -2,6 +2,7 @@ use crate::bash::ast::*;
 use crate::bash::parser;
 
 use super::context::RenderContext;
+use super::fallback::{command_literal_from_command, command_literal_from_shell};
 use super::syntax::{
     is_double_quoted, is_identifier, is_number, is_single_quoted, strip_outer_double_quotes,
 };
@@ -36,13 +37,11 @@ pub(super) fn parse_assignment(
             let value = parse_arithmetic_expansion(&full_value, ctx)
                 .or_else(|| parse_if_command_substitution_expression(&full_value, ctx))
                 .or_else(|| parse_and_or_command_substitution_expression(&full_value, ctx))
-                .or_else(|| {
-                    parse_function_call_command_substitution_expression(&full_value, ctx)
-                })?;
-            let name = ctx.declare_var(raw_name);
+                .or_else(|| parse_function_call_command_substitution_expression(&full_value, ctx))
+                .or_else(|| parse_generic_command_substitution_expression(&full_value, ctx))?;
             return Some(AssignmentRender {
                 raw_name: raw_name.to_string(),
-                name,
+                name: ctx.declare_var(raw_name),
                 value,
                 is_reassignment,
             });
@@ -53,17 +52,15 @@ pub(super) fn parse_assignment(
             full_value.push_str(word);
         }
         let items = parse_bash_array_items(&full_value, ctx)?;
-        let name = ctx.declare_var(raw_name);
         return Some(AssignmentRender {
             raw_name: raw_name.to_string(),
-            name,
+            name: ctx.declare_var(raw_name),
             value: format!("[{}]", items.join(", ")),
             is_reassignment,
         });
     }
 
     let value = first_value;
-    let name = ctx.declare_var(raw_name);
 
     let rendered = if let Some(expression) = parse_arithmetic_expansion(value, ctx) {
         expression
@@ -73,6 +70,8 @@ pub(super) fn parse_assignment(
         expression
     } else if let Some(expression) = parse_function_call_command_substitution_expression(value, ctx)
     {
+        expression
+    } else if let Some(expression) = parse_generic_command_substitution_expression(value, ctx) {
         expression
     } else if has_unresolved_shell_var(value, ctx) {
         return None;
@@ -92,7 +91,7 @@ pub(super) fn parse_assignment(
 
     Some(AssignmentRender {
         raw_name: raw_name.to_string(),
-        name,
+        name: ctx.declare_var(raw_name),
         value: rendered,
         is_reassignment,
     })
@@ -113,9 +112,41 @@ pub(super) fn render_condition_expr(command: &Command, ctx: &RenderContext) -> O
             )),
             Connector::Pipe => None,
         },
+        Command::Arithmetic(arith) => render_arithmetic_condition_expr(&arith.expression, ctx),
         Command::Simple(simple) => parse_test_expression(&simple.words, ctx),
         _ => None,
     }
+}
+
+pub(super) fn render_arithmetic_statement_expr(
+    expression: &str,
+    ctx: &mut RenderContext,
+) -> Option<String> {
+    let trimmed = expression.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rendered) = parse_arithmetic_assignment_statement(trimmed, ctx) {
+        return Some(rendered);
+    }
+
+    if let Some(rendered) = parse_arithmetic_increment_statement(trimmed, ctx) {
+        return Some(rendered);
+    }
+
+    parse_arithmetic_expression(trimmed, ctx)
+}
+
+pub(super) fn render_arithmetic_condition_expr(
+    expression: &str,
+    ctx: &RenderContext,
+) -> Option<String> {
+    let rendered = parse_arithmetic_expression(expression, ctx)?;
+    if arithmetic_expression_is_boolean(&rendered) {
+        return Some(rendered);
+    }
+    Some(format!("({rendered}) != 0"))
 }
 
 pub(super) fn render_for_items(items: &[String], ctx: &RenderContext) -> Option<String> {
@@ -373,10 +404,22 @@ fn parse_arithmetic_expansion(value: &str, ctx: &RenderContext) -> Option<String
     if inner.is_empty() {
         return None;
     }
+    parse_arithmetic_expression(inner, ctx)
+}
 
-    let chars: Vec<char> = inner.chars().collect();
+fn parse_arithmetic_expression(value: &str, ctx: &RenderContext) -> Option<String> {
+    let tokens = parse_arithmetic_tokens(value, ctx)?;
+    let tokens = convert_c_style_ternary_tokens(&tokens)?;
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(tokens.join(" "))
+}
+
+fn parse_arithmetic_tokens(value: &str, ctx: &RenderContext) -> Option<Vec<String>> {
+    let chars: Vec<char> = value.chars().collect();
     let mut tokens = Vec::new();
-    let mut i = 0;
+    let mut i = 0usize;
 
     while i < chars.len() {
         let ch = chars[i];
@@ -388,7 +431,7 @@ fn parse_arithmetic_expansion(value: &str, ctx: &RenderContext) -> Option<String
 
         if ch.is_ascii_digit() {
             let mut j = i + 1;
-            while j < chars.len() && chars[j].is_ascii_digit() {
+            while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
                 j += 1;
             }
             tokens.push(chars[i..j].iter().collect::<String>());
@@ -402,8 +445,11 @@ fn parse_arithmetic_expansion(value: &str, ctx: &RenderContext) -> Option<String
                 j += 1;
             }
             let name: String = chars[i..j].iter().collect();
-            let resolved = ctx.resolve_var(&name)?;
-            tokens.push(resolved);
+            if matches!(name.as_str(), "and" | "or" | "not") {
+                tokens.push(name);
+            } else {
+                tokens.push(ctx.resolve_var(&name)?);
+            }
             i = j;
             continue;
         }
@@ -424,6 +470,9 @@ fn parse_arithmetic_expansion(value: &str, ctx: &RenderContext) -> Option<String
 
                 let name: String = chars[i + 2..j].iter().collect();
                 let resolved = if let Ok(index) = name.parse::<usize>() {
+                    if index == 0 {
+                        return None;
+                    }
                     ctx.resolve_positional(index)
                 } else {
                     ctx.resolve_var(&name)
@@ -439,8 +488,7 @@ fn parse_arithmetic_expansion(value: &str, ctx: &RenderContext) -> Option<String
                     j += 1;
                 }
                 let name: String = chars[i + 1..j].iter().collect();
-                let resolved = ctx.resolve_var(&name)?;
-                tokens.push(resolved);
+                tokens.push(ctx.resolve_var(&name)?);
                 i = j;
                 continue;
             }
@@ -450,10 +498,12 @@ fn parse_arithmetic_expansion(value: &str, ctx: &RenderContext) -> Option<String
                 while j < chars.len() && chars[j].is_ascii_digit() {
                     j += 1;
                 }
-                let index_str: String = chars[i + 1..j].iter().collect();
-                let index = index_str.parse::<usize>().ok()?;
-                let resolved = ctx.resolve_positional(index)?;
-                tokens.push(resolved);
+                let index: String = chars[i + 1..j].iter().collect();
+                let index = index.parse::<usize>().ok()?;
+                if index == 0 {
+                    return None;
+                }
+                tokens.push(ctx.resolve_positional(index)?);
                 i = j;
                 continue;
             }
@@ -461,28 +511,271 @@ fn parse_arithmetic_expansion(value: &str, ctx: &RenderContext) -> Option<String
             return None;
         }
 
-        if is_supported_arithmetic_operator(ch) {
-            if i + 1 < chars.len()
-                && is_supported_arithmetic_operator(chars[i + 1])
-                && is_multi_char_operator(ch, chars[i + 1])
-            {
-                tokens.push(format!("{ch}{}", chars[i + 1]));
-                i += 2;
-            } else {
-                tokens.push(ch.to_string());
-                i += 1;
-            }
-            continue;
-        }
+        let (operator, next) = parse_arithmetic_operator(&chars, i)?;
+        let normalized = normalize_arithmetic_operator(operator)?;
+        tokens.push(normalized);
+        i = next;
+    }
 
+    Some(tokens)
+}
+
+fn parse_arithmetic_assignment_statement(
+    expression: &str,
+    ctx: &mut RenderContext,
+) -> Option<String> {
+    let (lhs_raw, op, rhs_raw) = parse_arithmetic_assignment_parts(expression)?;
+    if !is_identifier(lhs_raw) {
         return None;
     }
 
-    if tokens.is_empty() {
-        None
-    } else {
-        Some(tokens.join(" "))
+    let rhs = parse_arithmetic_expression(rhs_raw, ctx)?;
+    let existing = ctx.resolve_var(lhs_raw);
+
+    if op == "=" {
+        if let Some(name) = existing {
+            return Some(format!("{name} = {rhs}"));
+        }
+
+        let name = ctx.declare_var(lhs_raw);
+        return Some(format!("let {name} = {rhs}"));
     }
+
+    let base = parse_compound_assignment_operator(op)?;
+    let name = existing?;
+    Some(format!("{name} = {name} {base} {rhs}"))
+}
+
+fn parse_arithmetic_increment_statement(
+    expression: &str,
+    ctx: &mut RenderContext,
+) -> Option<String> {
+    let compact = expression
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+
+    if let Some(raw) = compact.strip_suffix("++")
+        && is_identifier(raw)
+    {
+        let name = ctx.resolve_var(raw)?;
+        return Some(format!("{name} = {name} + 1"));
+    }
+
+    if let Some(raw) = compact.strip_prefix("++")
+        && is_identifier(raw)
+    {
+        let name = ctx.resolve_var(raw)?;
+        return Some(format!("{name} = {name} + 1"));
+    }
+
+    if let Some(raw) = compact.strip_suffix("--")
+        && is_identifier(raw)
+    {
+        let name = ctx.resolve_var(raw)?;
+        return Some(format!("{name} = {name} - 1"));
+    }
+
+    if let Some(raw) = compact.strip_prefix("--")
+        && is_identifier(raw)
+    {
+        let name = ctx.resolve_var(raw)?;
+        return Some(format!("{name} = {name} - 1"));
+    }
+
+    None
+}
+
+fn parse_arithmetic_assignment_parts(expression: &str) -> Option<(&str, &str, &str)> {
+    for op in ["+=", "-=", "*=", "/=", "%=", "="] {
+        let Some((lhs, rhs)) = expression.split_once(op) else {
+            continue;
+        };
+
+        let lhs = lhs.trim();
+        let rhs = rhs.trim();
+        if lhs.is_empty() || rhs.is_empty() {
+            continue;
+        }
+
+        if op == "=" {
+            let lhs_tail = lhs.chars().last();
+            if matches!(lhs_tail, Some('<' | '>' | '!' | '=')) {
+                continue;
+            }
+
+            let rhs_head = rhs.chars().next();
+            if matches!(rhs_head, Some('=')) {
+                continue;
+            }
+        }
+
+        return Some((lhs, op, rhs));
+    }
+
+    None
+}
+
+fn parse_compound_assignment_operator(op: &str) -> Option<&'static str> {
+    match op {
+        "+=" => Some("+"),
+        "-=" => Some("-"),
+        "*=" => Some("*"),
+        "/=" => Some("/"),
+        "%=" => Some("%"),
+        _ => None,
+    }
+}
+
+fn arithmetic_expression_is_boolean(expression: &str) -> bool {
+    let tokens = expression.split_whitespace().collect::<Vec<&str>>();
+    if tokens.iter().any(|token| matches!(*token, "then" | "else")) {
+        return false;
+    }
+
+    expression.split_whitespace().any(|token| {
+        matches!(
+            token,
+            "==" | "!=" | "<" | "<=" | ">" | ">=" | "and" | "or" | "not"
+        )
+    })
+}
+
+fn parse_arithmetic_operator(chars: &[char], start: usize) -> Option<(&'static str, usize)> {
+    let remaining = chars.len().saturating_sub(start);
+    if remaining >= 3 {
+        let triple: String = chars[start..start + 3].iter().collect();
+        if let Some(op) = match triple.as_str() {
+            "<<=" => Some("<<="),
+            ">>=" => Some(">>="),
+            _ => None,
+        } {
+            return Some((op, start + 3));
+        }
+    }
+
+    if remaining >= 2 {
+        let pair: String = chars[start..start + 2].iter().collect();
+        if let Some(op) = match pair.as_str() {
+            "++" => Some("++"),
+            "--" => Some("--"),
+            "**" => Some("**"),
+            "<<" => Some("<<"),
+            ">>" => Some(">>"),
+            "<=" => Some("<="),
+            ">=" => Some(">="),
+            "==" => Some("=="),
+            "!=" => Some("!="),
+            "&&" => Some("&&"),
+            "||" => Some("||"),
+            "+=" => Some("+="),
+            "-=" => Some("-="),
+            "*=" => Some("*="),
+            "/=" => Some("/="),
+            "%=" => Some("%="),
+            "&=" => Some("&="),
+            "|=" => Some("|="),
+            "^=" => Some("^="),
+            _ => None,
+        } {
+            return Some((op, start + 2));
+        }
+    }
+
+    match chars[start] {
+        '+' => Some(("+", start + 1)),
+        '-' => Some(("-", start + 1)),
+        '*' => Some(("*", start + 1)),
+        '/' => Some(("/", start + 1)),
+        '%' => Some(("%", start + 1)),
+        '(' => Some(("(", start + 1)),
+        ')' => Some((")", start + 1)),
+        '<' => Some(("<", start + 1)),
+        '>' => Some((">", start + 1)),
+        '=' => Some(("=", start + 1)),
+        '!' => Some(("!", start + 1)),
+        '&' => Some(("&", start + 1)),
+        '|' => Some(("|", start + 1)),
+        '^' => Some(("^", start + 1)),
+        '~' => Some(("~", start + 1)),
+        '?' => Some(("?", start + 1)),
+        ':' => Some((":", start + 1)),
+        ',' => Some((",", start + 1)),
+        _ => None,
+    }
+}
+
+fn normalize_arithmetic_operator(operator: &str) -> Option<String> {
+    match operator {
+        "+" | "-" | "*" | "/" | "%" | "(" | ")" | "<" | ">" | "<=" | ">=" | "==" | "!=" => {
+            Some(operator.to_string())
+        }
+        "&&" => Some("and".to_string()),
+        "||" => Some("or".to_string()),
+        "!" => Some("not".to_string()),
+        "?" | ":" => Some(operator.to_string()),
+        _ => None,
+    }
+}
+
+fn convert_c_style_ternary_tokens(tokens: &[String]) -> Option<Vec<String>> {
+    if !tokens.iter().any(|token| token == "?") {
+        return Some(tokens.to_vec());
+    }
+
+    let question = find_top_level_question(tokens)?;
+    let colon = find_matching_colon(tokens, question)?;
+
+    if question == 0 || colon <= question + 1 || colon + 1 >= tokens.len() {
+        return None;
+    }
+
+    let condition = convert_c_style_ternary_tokens(&tokens[..question])?;
+    let when_true = convert_c_style_ternary_tokens(&tokens[question + 1..colon])?;
+    let when_false = convert_c_style_ternary_tokens(&tokens[colon + 1..])?;
+
+    let mut result = Vec::new();
+    result.extend(condition);
+    result.push("then".to_string());
+    result.extend(when_true);
+    result.push("else".to_string());
+    result.extend(when_false);
+    Some(result)
+}
+
+fn find_top_level_question(tokens: &[String]) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate() {
+        match token.as_str() {
+            "(" => depth += 1,
+            ")" => depth = depth.saturating_sub(1),
+            "?" if depth == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn find_matching_colon(tokens: &[String], question_index: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut nested_questions = 0usize;
+
+    for (index, token) in tokens.iter().enumerate().skip(question_index + 1) {
+        match token.as_str() {
+            "(" => depth += 1,
+            ")" => depth = depth.saturating_sub(1),
+            "?" if depth == 0 => nested_questions += 1,
+            ":" if depth == 0 => {
+                if nested_questions == 0 {
+                    return Some(index);
+                }
+                nested_questions -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn parse_if_command_substitution_expression(value: &str, ctx: &RenderContext) -> Option<String> {
@@ -538,6 +831,29 @@ fn parse_function_call_command_substitution_expression(
     };
 
     render_simple_function_call_expr(simple, ctx)
+}
+
+fn parse_generic_command_substitution_expression(
+    value: &str,
+    ctx: &RenderContext,
+) -> Option<String> {
+    let trimmed = value.trim();
+    let inner = trimmed.strip_prefix("$(")?.strip_suffix(')')?.trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    let parsed = parser::parse(inner, None);
+    if let Ok(parsed) = parsed
+        && parsed.statements.len() == 1
+    {
+        return Some(command_literal_from_command(
+            parsed.statements.first()?,
+            ctx,
+        ));
+    }
+
+    Some(command_literal_from_shell(inner))
 }
 
 fn extract_echo_expression(body: &[Command], ctx: &RenderContext) -> Option<String> {
@@ -608,28 +924,6 @@ pub(super) fn render_simple_function_call_expr(
         .collect::<Option<Vec<String>>>()?;
 
     Some(format!("{}({})", sig.amber_name, args.join(", ")))
-}
-
-fn is_supported_arithmetic_operator(ch: char) -> bool {
-    matches!(
-        ch,
-        '+' | '-' | '*' | '/' | '%' | '(' | ')' | '<' | '>' | '=' | '!' | '&' | '|'
-    )
-}
-
-fn is_multi_char_operator(left: char, right: char) -> bool {
-    matches!(
-        (left, right),
-        ('<', '<')
-            | ('>', '>')
-            | ('<', '=')
-            | ('>', '=')
-            | ('=', '=')
-            | ('!', '=')
-            | ('&', '&')
-            | ('|', '|')
-            | ('*', '*')
-    )
 }
 
 fn contains_unresolved_shell_expansion(text: &str, ctx: &RenderContext) -> bool {
