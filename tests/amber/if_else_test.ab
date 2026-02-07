@@ -1,0 +1,6 @@
+let status_var = "200"
+if status_var == "200" {
+    echo("UP")
+} else {
+    echo("DOWN")
+}

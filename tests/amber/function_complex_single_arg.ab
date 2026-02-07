@@ -1,0 +1,6 @@
+fun process_item(value) {
+    echo("input:{value}")
+    trust $ printf -v {nameof value} "%s_processed" {value} $
+    echo(value)
+}
+process_item("amber")

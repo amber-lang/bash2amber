@@ -1,0 +1,9 @@
+let fruit = "pear"
+if {
+    fruit == "apple" or fruit == "banana" {
+        echo("common")
+    }
+    fruit == "pear" {
+        echo("pear")
+    }
+}

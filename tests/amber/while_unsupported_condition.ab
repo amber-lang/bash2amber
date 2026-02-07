@@ -1,0 +1,4 @@
+while trust $ grep -q "needle" /dev/null $ {
+    echo("loop")
+}
+echo("done")

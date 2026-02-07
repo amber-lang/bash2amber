@@ -1,0 +1,3 @@
+for item in trust $ "\$@" $ {
+    echo(item)
+}

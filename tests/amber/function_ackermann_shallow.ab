@@ -1,0 +1,20 @@
+fun ackermann(m: Num, n: Num): Num {
+    if m == 0 {
+        let result = n + 1
+        return result
+    } else {
+        if (m > 0) and (n == 0) {
+            let m1 = m - 1
+            let result = ackermann(m1, 1)
+            return result
+        } else {
+            let n1 = n - 1
+            let inner = ackermann(m, n1)
+            let m1 = m - 1
+            let result = ackermann(m1, inner)
+            return result
+        }
+    }
+}
+let ack22 = ackermann(2, 2)
+echo(ack22)

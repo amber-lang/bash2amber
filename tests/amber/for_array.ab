@@ -1,0 +1,4 @@
+let groceries = ["apple", "banana", "cherry"]
+for item in groceries {
+    echo(item)
+}

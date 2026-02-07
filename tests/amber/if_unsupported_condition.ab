@@ -1,0 +1,9 @@
+fun run() {
+    if trust $ grep -q "needle" /dev/null $ {
+        echo("found")
+    } else {
+        echo("missing")
+    }
+    echo("after")
+}
+run()

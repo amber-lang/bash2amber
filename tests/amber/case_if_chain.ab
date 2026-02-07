@@ -1,0 +1,12 @@
+let action = "stop"
+if {
+    action == "start" {
+        echo("starting")
+    }
+    action == "stop" {
+        echo("stopping")
+    }
+    else {
+        echo("unknown")
+    }
+}

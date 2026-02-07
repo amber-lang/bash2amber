@@ -1,0 +1,4 @@
+let mode = "prod"
+let status_var = ""
+status_var = mode == "prod" then "live" else "test"
+echo(status_var)

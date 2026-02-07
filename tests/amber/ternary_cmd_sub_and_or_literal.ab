@@ -1,0 +1,9 @@
+fun True() {
+    echo("True")
+}
+fun False() {
+    echo("False")
+}
+let condition = "true"
+let var = condition == "true" then "True" else "False"
+echo(var)

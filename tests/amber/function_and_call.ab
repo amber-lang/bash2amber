@@ -1,0 +1,4 @@
+fun foo(arg1) {
+    echo("Hello {arg1}")
+}
+foo("Pablo")

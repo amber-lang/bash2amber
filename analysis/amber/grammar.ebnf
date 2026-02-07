@@ -1,0 +1,253 @@
+(*
+    This is a basic grammar declaration for Amber written in EBNF.
+    This syntax does not include features that are not fully stable yet.
+*)
+
+root = { statement_global } ;
+
+(* Statement *)
+statement_local =
+    builtins_statement |
+    expression |
+    if_chain |
+    if_statement |
+    loop |
+    loop_array |
+    while_loop |
+    variable_init_const |
+    variable_init_mut |
+    variable_set ;
+statement_global =
+    function_def |
+    import_all |
+    import_ids |
+    main |
+    test |
+    statement_local ;
+
+(* Block *)
+singleline_block = ':', statement_local ;
+multiline_block = '{', { statement_local }, '}' ;
+block = singleline_block | multiline_block ;
+
+(* Expression *)
+expression =
+    binary_operation |
+    boolean |
+    builtins_expression |
+    command |
+    function_call |
+    function_call_failed |
+    identifier |
+    array |
+    null |
+    number |
+    parentheses |
+    range |
+    range_inclusive |
+    ternary |
+    text |
+    unary_operation |
+    expression_index ;
+
+(* Keywords *)
+KEYWORD_AND = 'and' ;
+KEYWORD_AS = 'as' ;
+KEYWORD_AWAIT = 'await' ;
+KEYWORD_BREAK = 'break' ;
+KEYWORD_CD = 'cd' ;
+KEYWORD_CLEAR = 'clear' ;
+KEYWORD_CONST = 'const' ;
+KEYWORD_CONTINUE = 'continue' ;
+KEYWORD_CP = 'cp' ;
+KEYWORD_ECHO = 'echo' ;
+KEYWORD_ELSE = 'else' ;
+KEYWORD_EXIT = 'exit' ;
+KEYWORD_FAIL = 'fail' ;
+KEYWORD_FAILED = 'failed' ;
+KEYWORD_FOR = 'for' ;
+KEYWORD_FROM = 'from' ;
+KEYWORD_FUN = 'fun' ;
+KEYWORD_IF = 'if' ;
+KEYWORD_IMPORT = 'import' ;
+KEYWORD_IN = 'in' ;
+KEYWORD_IS = 'is' ;
+KEYWORD_LEN = 'len' ;
+KEYWORD_LET = 'let' ;
+KEYWORD_LINES = 'lines' ;
+KEYWORD_LOOP = 'loop' ;
+KEYWORD_LS = 'ls' ;
+KEYWORD_MAIN = 'main' ;
+KEYWORD_MV = 'mv' ;
+KEYWORD_NAMEOF = 'nameof' ;
+KEYWORD_NOT = 'not' ;
+KEYWORD_OR = 'or' ;
+KEYWORD_PID = 'pid' ;
+KEYWORD_PUB = 'pub' ;
+KEYWORD_PWD = 'pwd' ;
+KEYWORD_REF = 'ref' ;
+KEYWORD_RETURN = 'return' ;
+KEYWORD_RM = 'rm' ;
+KEYWORD_SILENT = 'silent' ;
+KEYWORD_SUPPRESS = 'suppress' ;
+KEYWORD_SLEEP = 'sleep' ;
+KEYWORD_STATUS = 'status' ;
+KEYWORD_SUDO = 'sudo' ;
+KEYWORD_SUCCEEDED = 'succeeded' ;
+KEYWORD_TEST = 'test' ;
+KEYWORD_THEN = 'then' ;
+KEYWORD_TOUCH = 'touch' ;
+KEYWORD_TRUST = 'trust' ;
+KEYWORD_EXITED = 'exited' ;
+KEYWORD_UNSAFE = 'unsafe' ;
+KEYWORD_WHILE = 'while' ;
+
+(* Terminals *)
+ANY_CHAR = ? any character ? ;
+LETTER = 'A'..'Z' | 'a'..'z' ;
+DIGIT = '0'..'9' ;
+TYPE = SIMPLE_TYPE, { '|', SIMPLE_TYPE } ;
+SIMPLE_TYPE = 'Text' | 'Num' | 'Bool' | 'Null' | 'Int' | '[', TYPE, ']' ;
+UNARY_OP = '-' | KEYWORD_NOT ;
+BINARY_OP = '+' | '-' | '*' | '/' | '%' | KEYWORD_AND | KEYWORD_OR | '==' | '!=' | '<' | '<=' | '>' | '>=' ;
+VISIBILITY = KEYWORD_PUB ;
+
+(* Identifier *)
+any_identifier = (LETTER | '_'), { LETTER | '_' | DIGIT } ;
+internal_identifier = '__', { LETTER | '_' | DIGIT } ;
+identifier = any_identifier - internal_identifier ;
+
+(* `Num` literal *)
+integer = DIGIT, { DIGIT } ;
+real = integer, '.', integer ;
+number = integer | real ;
+
+(* `Text` literal *)
+interpolation = '{', expression, '}' ;
+text = '"', { ANY_CHAR | interpolation }, '"' ;
+
+(* `Bool` literal *)
+boolean = 'true' | 'false' ;
+
+(* `Null` literal *)
+null = 'null' ;
+
+(* `Array` literal *)
+empty_array = '[', [ TYPE ], ']' ;
+full_array = '[', [ expression, { ',', expression } ], ']' ;
+array = empty_array | full_array ;
+
+(* Command expression *)
+(* The ordering of command modifiers doesn't matter *)
+command_modifier = [ KEYWORD_SILENT | KEYWORD_SUPPRESS ], [ KEYWORD_TRUST ], [ KEYWORD_SUDO ] ;
+command_modifier_block = command_modifier, multiline_block ;
+command_base = '$', { ANY_CHAR | interpolation }, '$' ;
+command = command_modifier, command_base, [ handler ] ;
+
+(* Operations *)
+binary_operation = expression, BINARY_OP, expression ;
+unary_operation = UNARY_OP, expression ;
+expression_index = expression, '[', expression, ']' ;
+
+(* Parentheses *)
+parentheses = '(', expression, ')' ;
+
+(* Failure handler *)
+failure_propagation = '?';
+failure_block = KEYWORD_FAILED, [ '(', identifier, ')' ], block ;
+failure_handler = failure_propagation | failure_block ;
+
+(* Success handler *)
+success_block = KEYWORD_SUCCEEDED, block ;
+success_handler = success_block ;
+
+(* Exited handler *)
+exited_block = KEYWORD_EXITED, [ '(', identifier, ')' ], block ;
+exited_handler = exited_block ;
+
+(* All handlers combined *)
+handler = success_handler | failure_handler | exited_handler ;
+
+(* Attributes *)
+attribute_name = any_identifier ;
+attribute = '#[', attribute_name, ']' ;
+
+(* Variable *)
+variable_index = '[', expression, ']' ;
+variable_init_mut = { attribute }, [ VISIBILITY ], KEYWORD_LET, identifier, '=', expression ;
+variable_init_const = { attribute }, [ VISIBILITY ], KEYWORD_CONST, identifier, '=', expression ;
+variable_get = identifier ;
+variable_set = identifier, variable_index?, '=', expression ;
+
+(* Function *)
+function_call = command_modifier, identifier, '(', [ expression, { ',', expression } ], ')' ;
+function_call_failed = function_call, [ handler ] ;
+function_def = { attribute }, [ VISIBILITY ], KEYWORD_FUN, identifier, '(', [ identifier, { ',', identifier } ], ')', block ;
+function_def_typed = { attribute }, [ VISIBILITY ], KEYWORD_FUN, identifier, '(',
+    [ identifier, ':', TYPE, { ',', identifier, ':', TYPE } ], ')', ':', TYPE, block ;
+
+(* Loop *)
+loop = KEYWORD_LOOP, block ;
+loop_array = KEYWORD_FOR | KEYWORD_LOOP, identifier, KEYWORD_IN, expression, block ;
+loop_array_iterator = KEYWORD_FOR | KEYWORD_LOOP, identifier, ',', identifier, KEYWORD_IN, expression, block ;
+while_loop = KEYWORD_WHILE, expression, block ;
+
+(* Ranges *)
+range = expression, '..', expression ;
+range_inclusive = expression, '..=', expression ;
+
+(* Conditional *)
+if_statement = KEYWORD_IF, expression, block, [ KEYWORD_ELSE, block ] ;
+if_chain = KEYWORD_IF, '{', { expression, block }, [ KEYWORD_ELSE, block ],  '}' ;
+ternary = expression, KEYWORD_THEN, expression, KEYWORD_ELSE, expression ;
+
+(* Main *)
+main = KEYWORD_MAIN, [ '(', identifier, ')' ], block ;
+
+(* Imports *)
+import_path = '"', { ANY_CHAR }, '"' ;
+import_all = [ VISIBILITY ], KEYWORD_IMPORT, '*', KEYWORD_FROM, import_path ;
+import_ids = [ VISIBILITY ], KEYWORD_IMPORT, '{', { identifier, [ KEYWORD_AS, identifier ], [ ',' ] }, '}', KEYWORD_FROM, import_path ;
+
+(* Comment *)
+comment = '//', { ANY_CHAR }, '\n' ;
+
+(* Built-ins *)
+builtins_statement =
+    builtin_await |
+    builtin_cd |
+    builtin_clear |
+    builtin_cp |
+    builtin_echo |
+    builtin_exit |
+    builtin_mv |
+    builtin_rm |
+    builtin_sleep ;
+builtin_await = KEYWORD_AWAIT, expression ;
+builtin_cd = KEYWORD_CD, expression ;
+builtin_clear = KEYWORD_CLEAR ;
+builtin_cp = KEYWORD_CP, expression ;
+builtin_echo = KEYWORD_ECHO, expression ;
+builtin_exit = KEYWORD_EXIT, expression ;
+builtin_mv = KEYWORD_MV, expression ;
+builtin_rm = KEYWORD_RM, expression ;
+builtin_sleep = KEYWORD_SLEEP, expression ;
+builtin_touch = KEYWORD_TOUCH, expression ;
+
+builtins_expression =
+    builtin_len |
+    builtin_lines |
+    builtin_ls |
+    builtin_nameof |
+    builtin_pid |
+    builtin_pwd ;
+builtin_len = KEYWORD_LEN, expression ;
+builtin_lines = KEYWORD_LINES, expression ;
+builtin_ls = KEYWORD_LS, expression ;
+builtin_nameof = KEYWORD_NAMEOF, expression ;
+builtin_pid = KEYWORD_PID ;
+builtin_pwd = KEYWORD_PWD, expression ;
+
+(* Test *)
+test_name = '"', { ANY_CHAR }, '"' ;
+test = KEYWORD_TEST, [ test_name ], block ;

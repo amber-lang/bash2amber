@@ -1,0 +1,3 @@
+let condition = "true"
+let result = condition == "true" then "True" else "False"
+echo(result)
