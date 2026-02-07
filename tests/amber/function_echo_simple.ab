@@ -1,0 +1,5 @@
+fun greet(arg1) {
+    echo("Hello, {arg1}!")
+    echo("Welcome to the system.")
+}
+greet("World")

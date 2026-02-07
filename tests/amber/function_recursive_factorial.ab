@@ -1,12 +1,2 @@
-fun fact(n: Num): Num {
-    if n <= 1 {
-        let result = 1
-        return result
-    } else {
-        let prev = n - 1
-        let sub = fact(prev)
-        let result = n * sub
-        return result
-    }
-}
-echo(fact(5))
+trust $ fact() \{ n="\$1"; if [ "\$n" -le 1 ]; then echo 1; else prev=\$((n - 1)); sub=\$(fact "\$prev" ); echo \$((n * sub)); fi; } $
+trust $ fact 5 $

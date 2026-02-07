@@ -1,7 +1,7 @@
 use crate::bash::ast::*;
 use crate::bash::parser;
 
-use super::context::RenderContext;
+use super::context::{FunctionRenderMode, RenderContext};
 use super::fallback::{command_literal_from_command, command_literal_from_shell};
 use super::syntax::{
     is_double_quoted, is_identifier, is_number, is_single_quoted, strip_outer_double_quotes,
@@ -19,18 +19,35 @@ pub(super) fn parse_assignment(
     ctx: &mut RenderContext,
 ) -> Option<AssignmentRender> {
     let first_word = simple.words.first()?;
-    let (raw_name, first_value) = first_word.split_once('=')?;
+    let (is_local, assignment_index) = if first_word == "local" {
+        if simple.words.len() < 2 {
+            return None;
+        }
+        (true, 1usize)
+    } else {
+        (false, 0usize)
+    };
+
+    let assignment_word = simple.words.get(assignment_index)?;
+    let (raw_name, first_value) = assignment_word.split_once('=')?;
 
     if !is_identifier(raw_name) {
         return None;
     }
 
-    let is_reassignment = ctx.resolve_var(raw_name).is_some();
+    let is_reassignment = !is_local && ctx.resolve_var(raw_name).is_some();
+    let declare = |ctx: &mut RenderContext, raw_name: &str| -> String {
+        if is_local {
+            ctx.declare_local_var(raw_name)
+        } else {
+            ctx.declare_var(raw_name)
+        }
+    };
 
-    if simple.words.len() > 1 {
+    if simple.words.len() > assignment_index + 1 {
         if !first_value.trim_start().starts_with('(') {
             let mut full_value = first_value.to_string();
-            for word in simple.words.iter().skip(1) {
+            for word in simple.words.iter().skip(assignment_index + 1) {
                 full_value.push(' ');
                 full_value.push_str(word);
             }
@@ -41,20 +58,20 @@ pub(super) fn parse_assignment(
                 .or_else(|| parse_generic_command_substitution_expression(&full_value, ctx))?;
             return Some(AssignmentRender {
                 raw_name: raw_name.to_string(),
-                name: ctx.declare_var(raw_name),
+                name: declare(ctx, raw_name),
                 value,
                 is_reassignment,
             });
         }
         let mut full_value = first_value.to_string();
-        for word in simple.words.iter().skip(1) {
+        for word in simple.words.iter().skip(assignment_index + 1) {
             full_value.push(' ');
             full_value.push_str(word);
         }
         let items = parse_bash_array_items(&full_value, ctx)?;
         return Some(AssignmentRender {
             raw_name: raw_name.to_string(),
-            name: ctx.declare_var(raw_name),
+            name: declare(ctx, raw_name),
             value: format!("[{}]", items.join(", ")),
             is_reassignment,
         });
@@ -91,7 +108,7 @@ pub(super) fn parse_assignment(
 
     Some(AssignmentRender {
         raw_name: raw_name.to_string(),
-        name: ctx.declare_var(raw_name),
+        name: declare(ctx, raw_name),
         value: rendered,
         is_reassignment,
     })
@@ -912,6 +929,9 @@ pub(super) fn render_simple_function_call_expr(
 ) -> Option<String> {
     let function_name = simple.words.first()?;
     let sig = ctx.resolve_function(function_name)?;
+    if sig.render_mode != FunctionRenderMode::Native {
+        return None;
+    }
     let args = &simple.words[1..];
 
     if args.len() != sig.arity {
