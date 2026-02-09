@@ -6,7 +6,8 @@ use super::syntax::{is_reserved_keyword, normalize_identifier};
 
 #[derive(Debug, Clone)]
 pub(super) struct TypeCommentParam {
-    pub(super) name: String,
+    /// `None` for unnamed params like `(Text)`, `Some(name)` for `(name: Text)`.
+    pub(super) name: Option<String>,
     pub(super) type_name: String,
 }
 
@@ -14,7 +15,6 @@ pub(super) struct TypeCommentParam {
 pub(super) struct TypeCommentSignature {
     pub(super) params: Vec<TypeCommentParam>,
     pub(super) return_contract: TypeCommentReturnContract,
-    pub(super) comment_line: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ pub(super) enum TypeCommentReturnContract {
 #[derive(Debug, Clone)]
 pub(super) enum FunctionTypeHint {
     Missing,
-    Invalid { comment_line: usize, raw: String },
+    Invalid,
     Typed(TypeCommentSignature),
 }
 
@@ -40,9 +40,34 @@ pub(super) struct FunctionHint {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GlobalVarType {
+    Int,
+    Text,
+    Unknown,
+}
+
+impl GlobalVarType {
+    pub(super) fn merge(self, other: GlobalVarType) -> Option<GlobalVarType> {
+        match (self, other) {
+            (a, b) if a == b => Some(a),
+            (GlobalVarType::Unknown, concrete) | (concrete, GlobalVarType::Unknown) => {
+                Some(concrete)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum FunctionRenderMode {
+    /// Function body and call sites render as native Amber
     Native,
-    FallbackLiteral,
+    /// Function body may contain trust $ for unsupported statements, but call sites render natively.
+    /// Used for variadic functions ($@, $*) or functions with minor unsupported patterns.
+    ShallowFallback,
+    /// Both function definition and call sites fall back to trust $ literals.
+    /// Used when function captures self-call return value or has conflicting types.
+    FullFallback,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +77,7 @@ pub(super) struct FunctionSig {
     pub(super) returns_value: bool,
     pub(super) render_mode: FunctionRenderMode,
     pub(super) typed_signature: Option<TypeCommentSignature>,
+    pub(super) global_vars: Vec<(String, GlobalVarType)>,
 }
 
 #[derive(Debug, Clone)]

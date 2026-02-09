@@ -1,0 +1,13 @@
+fun fact(arg1: Int): Int {
+    let n = arg1
+    if n <= 1 {
+        return 1
+    } else {
+        let prev = n - 1
+        let result = fact(prev)
+        let sub = result
+        return n * sub
+    }
+}
+let result = fact(5)
+echo(result)

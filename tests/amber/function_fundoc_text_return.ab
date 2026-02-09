@@ -1,0 +1,5 @@
+fun wrap(msg: Text): Text {
+    return "[{msg}]"
+}
+let output = wrap("hello")
+echo(output)

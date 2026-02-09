@@ -1,0 +1,8 @@
+fun process(first: Text, second: Text) {
+    trust $ echo "\$@" $
+    echo(first)
+    echo(second)
+    let third = second
+    echo(third)
+}
+process("arg1", "arg2")

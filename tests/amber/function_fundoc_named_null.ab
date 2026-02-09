@@ -1,0 +1,4 @@
+fun greet(name: Text) {
+    echo("Hello {name}")
+}
+greet("world")

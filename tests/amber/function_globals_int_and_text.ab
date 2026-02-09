@@ -1,0 +1,9 @@
+let count = 0
+let label = ""
+fun setup() {
+    count = 42
+    label = "hello"
+}
+setup()
+echo(count)
+echo(label)

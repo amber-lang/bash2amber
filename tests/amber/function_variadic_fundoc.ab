@@ -1,0 +1,6 @@
+fun process(arg1) {
+    let first = arg1
+    trust $ echo "\$@" $
+    echo(first)
+}
+process("arg1")

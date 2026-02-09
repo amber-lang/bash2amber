@@ -1,0 +1,14 @@
+let result = 0
+fun fact(arg1) {
+    if arg1 <= 1 {
+        result = 1
+    } else {
+        let prev = arg1 - 1
+        fact(prev)
+        let sub = result
+        result = arg1 * sub
+    }
+}
+fact(5)
+echo("Here is a result: {result}")
+echo("The result is: {result}")

@@ -1,5 +1,4 @@
 fun fact(n: Int): Int {
-    let n = n
     if n <= 1 {
         return 1
     } else {

@@ -7,7 +7,7 @@ use bash2amber::convert_bash_to_amber;
 use test_generator::test_resources;
 
 static RUN_ID: AtomicU64 = AtomicU64::new(1);
-// Keep this file changing when fixtures are added so test-generator re-expands glob inputs. (updated for function_echo_simple)
+
 
 #[test_resources("tests/bash/*.sh")]
 fn converts_fixture(resource: &str) {

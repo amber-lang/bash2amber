@@ -1,0 +1,5 @@
+fun greet(arg1: Text) {
+    let name = arg1
+    echo("Hello {name}")
+}
+greet("world")

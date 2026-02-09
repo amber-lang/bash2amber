@@ -2,6 +2,8 @@ use std::sync::LazyLock;
 
 use crate::bash::ast::*;
 
+use super::context::GlobalVarType;
+
 pub(super) fn is_identifier(text: &str) -> bool {
     let mut chars = text.chars();
     let Some(first) = chars.next() else {
@@ -64,67 +66,93 @@ pub(super) fn is_reserved_keyword(word: &str) -> bool {
     RESERVED_KEYWORDS.contains(&word)
 }
 
-pub(super) fn detect_function_arity(commands: &[Command]) -> usize {
-    commands.iter().map(detect_command_arity).max().unwrap_or(0)
+/// Result of analyzing a function body for positional parameters
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct FunctionTraits {
+    /// Maximum positional parameter used ($1, $2, etc.)
+    pub(super) arity: usize,
+    /// Whether the function uses variadic parameters ($@ or $*)
+    pub(super) is_variadic: bool,
 }
 
-fn detect_command_arity(command: &Command) -> usize {
+impl FunctionTraits {
+    fn merge(self, other: Self) -> Self {
+        Self {
+            arity: self.arity.max(other.arity),
+            is_variadic: self.is_variadic || other.is_variadic,
+        }
+    }
+}
+
+/// Analyze function body for arity and variadic usage in a single pass
+pub(super) fn detect_function_traits(commands: &[Command]) -> FunctionTraits {
+    commands
+        .iter()
+        .map(detect_command_traits)
+        .fold(FunctionTraits::default(), FunctionTraits::merge)
+}
+
+fn detect_command_traits(command: &Command) -> FunctionTraits {
     match command {
         Command::Simple(simple) => simple
             .words
             .iter()
-            .map(|word| max_positional_reference(word))
-            .max()
-            .unwrap_or(0),
-        Command::Arithmetic(arith) => max_positional_reference(&arith.expression),
-        Command::Background(inner) => detect_command_arity(inner),
+            .map(|word| analyze_text(word))
+            .fold(FunctionTraits::default(), FunctionTraits::merge),
+        Command::Arithmetic(arith) => analyze_text(&arith.expression),
+        Command::Background(inner) => detect_command_traits(inner),
         Command::Connection(connection) => {
-            detect_command_arity(&connection.left).max(detect_command_arity(&connection.right))
+            detect_command_traits(&connection.left).merge(detect_command_traits(&connection.right))
         }
         Command::If(if_cmd) => {
-            let cond = detect_command_arity(&if_cmd.condition);
-            let then_max = detect_function_arity(&if_cmd.then_body);
-            let else_max = if_cmd
+            let cond = detect_command_traits(&if_cmd.condition);
+            let then_traits = detect_function_traits(&if_cmd.then_body);
+            let else_traits = if_cmd
                 .else_body
                 .as_ref()
-                .map(|body| detect_function_arity(body))
-                .unwrap_or(0);
-            cond.max(then_max).max(else_max)
+                .map(|body| detect_function_traits(body))
+                .unwrap_or_default();
+            cond.merge(then_traits).merge(else_traits)
         }
         Command::While(while_cmd) => {
-            detect_command_arity(&while_cmd.condition).max(detect_function_arity(&while_cmd.body))
+            detect_command_traits(&while_cmd.condition).merge(detect_function_traits(&while_cmd.body))
         }
-        Command::For(for_cmd) => detect_function_arity(&for_cmd.body),
+        Command::For(for_cmd) => detect_function_traits(&for_cmd.body),
         Command::CStyleFor(for_cmd) => {
-            let init = max_positional_reference(&for_cmd.init);
-            let cond = max_positional_reference(&for_cmd.condition);
-            let update = max_positional_reference(&for_cmd.update);
-            init.max(cond)
-                .max(update)
-                .max(detect_function_arity(&for_cmd.body))
+            let init = analyze_text(&for_cmd.init);
+            let cond = analyze_text(&for_cmd.condition);
+            let update = analyze_text(&for_cmd.update);
+            init.merge(cond).merge(update).merge(detect_function_traits(&for_cmd.body))
         }
         Command::Case(case_cmd) => {
-            let subject = max_positional_reference(&case_cmd.word);
+            let subject = analyze_text(&case_cmd.word);
             let clauses = case_cmd
                 .clauses
                 .iter()
                 .map(|clause| {
-                    let pattern_max = clause
+                    let pattern_traits = clause
                         .patterns
                         .iter()
-                        .map(|pattern| max_positional_reference(pattern))
-                        .max()
-                        .unwrap_or(0);
-                    pattern_max.max(detect_function_arity(&clause.body))
+                        .map(|pattern| analyze_text(pattern))
+                        .fold(FunctionTraits::default(), FunctionTraits::merge);
+                    pattern_traits.merge(detect_function_traits(&clause.body))
                 })
-                .max()
-                .unwrap_or(0);
-            subject.max(clauses)
+                .fold(FunctionTraits::default(), FunctionTraits::merge);
+            subject.merge(clauses)
         }
-        Command::Function(function) => detect_function_arity(&function.body),
-        Command::Group(body) => detect_function_arity(body),
+        Command::Function(function) => detect_function_traits(&function.body),
+        Command::Group(body) => detect_function_traits(body),
     }
 }
+
+/// Analyze text for positional references and variadic usage
+fn analyze_text(text: &str) -> FunctionTraits {
+    FunctionTraits {
+        arity: max_positional_reference(text),
+        is_variadic: text.contains("$@") || text.contains("$*") || text.contains("${@") || text.contains("${*"),
+    }
+}
+
 
 fn max_positional_reference(text: &str) -> usize {
     let raw = strip_outer_double_quotes(text);
@@ -179,6 +207,36 @@ pub(super) fn strip_outer_double_quotes(word: &str) -> &str {
     } else {
         word
     }
+}
+
+pub(super) fn classify_assignment_rhs(value: &str) -> GlobalVarType {
+    if value.is_empty() {
+        return GlobalVarType::Text;
+    }
+    if is_number(value) {
+        return GlobalVarType::Int;
+    }
+    if value.starts_with("$((") && value.ends_with("))") {
+        return GlobalVarType::Int;
+    }
+    if is_double_quoted(value) {
+        let inner = &value[1..value.len() - 1];
+        // Pure variable ref like "$result" → Unknown
+        if inner.starts_with('$')
+            && !inner.contains(' ')
+            && inner[1..].chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '{' || c == '}')
+        {
+            return GlobalVarType::Unknown;
+        }
+        return GlobalVarType::Text;
+    }
+    if is_single_quoted(value) {
+        return GlobalVarType::Text;
+    }
+    if value.starts_with('$') {
+        return GlobalVarType::Unknown;
+    }
+    GlobalVarType::Unknown
 }
 
 static RESERVED_KEYWORDS: LazyLock<Vec<&str>> = LazyLock::new(|| {
