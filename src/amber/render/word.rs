@@ -3,7 +3,8 @@ use crate::bash::ast::*;
 use super::arithmetic::parse_arithmetic_expansion;
 use super::context::{FunctionRenderMode, RenderContext};
 use super::substitution::{
-    parse_and_or_command_substitution_expression, parse_function_call_command_substitution_expression,
+    parse_and_or_command_substitution_expression,
+    parse_function_call_command_substitution_expression,
     parse_generic_command_substitution_expression, parse_if_command_substitution_expression,
 };
 use super::syntax::{
@@ -167,7 +168,7 @@ pub(super) fn render_for_items(items: &[String], ctx: &RenderContext) -> Option<
     Some(format!("[{entries}]"))
 }
 
-pub(super) fn word_to_expr(word: &str, ctx: &RenderContext) -> Option<String> {
+pub(crate) fn word_to_expr(word: &str, ctx: &RenderContext) -> Option<String> {
     if let Some(var) = parse_variable_reference(word, ctx) {
         return Some(var);
     }

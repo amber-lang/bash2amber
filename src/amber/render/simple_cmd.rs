@@ -1,5 +1,6 @@
 use crate::bash::ast::*;
 
+use crate::amber::builtins;
 use crate::amber::fragments::{FragmentKind, FragmentRenderable, RawFragment, VarStmtFragment};
 
 use super::context::{FunctionRenderMode, RenderContext, TypeCommentReturnContract};
@@ -69,6 +70,11 @@ pub(super) fn render_simple(simple: &SimpleCommand, ctx: &mut RenderContext) -> 
                 );
             }
         }
+    }
+
+    // Try to convert to Amber builtins (rm, cp, mv, ls, etc.)
+    if let Some(builtin) = builtins::render_builtin(simple, ctx) {
+        return Some(RawFragment { value: builtin }.to_frag());
     }
 
     Some(

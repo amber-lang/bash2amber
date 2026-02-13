@@ -1,0 +1,4 @@
+trust ls()
+trust ls("/home")
+trust ls("/home", true)
+let x = pwd()

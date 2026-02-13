@@ -1,6 +1,6 @@
 mod analysis;
 mod arithmetic;
-mod context;
+pub(crate) mod context;
 mod control_flow;
 mod fallback;
 mod fragment_expr;
@@ -9,7 +9,7 @@ mod simple_cmd;
 mod substitution;
 mod syntax;
 mod type_comment;
-mod word;
+pub(crate) mod word;
 
 use std::collections::{HashMap, HashSet};
 

@@ -440,8 +440,13 @@ fn consume_case_statement_separators(meta: &mut DefaultMetadata) {
             return;
         };
 
-        if word == "\n" || is_comment(&word) {
+        if word == "\n" {
             meta.increment_index();
+            continue;
+        }
+
+        if is_comment(&word) {
+            skip_comment(meta);
             continue;
         }
 
@@ -870,11 +875,23 @@ fn looks_like_assignment_prefix(word: &str) -> bool {
     is_identifier(name)
 }
 
+fn skip_comment(meta: &mut DefaultMetadata) {
+    while let Some(word) = current_word(meta) {
+        meta.increment_index();
+        if word == "\n" {
+            break;
+        }
+    }
+}
+
 fn consume_separators(meta: &mut DefaultMetadata) -> usize {
     let mut consumed = 0;
     while let Some(word) = current_word(meta) {
-        if is_separator(&word) || is_comment(&word) {
+        if is_separator(&word) {
             meta.increment_index();
+            consumed += 1;
+        } else if is_comment(&word) {
+            skip_comment(meta);
             consumed += 1;
         } else {
             break;
@@ -885,8 +902,10 @@ fn consume_separators(meta: &mut DefaultMetadata) -> usize {
 
 fn consume_connector_separators(meta: &mut DefaultMetadata) {
     while let Some(word) = current_word(meta) {
-        if word == "\n" || is_comment(&word) {
+        if word == "\n" {
             meta.increment_index();
+        } else if is_comment(&word) {
+            skip_comment(meta);
         } else {
             break;
         }
@@ -1058,5 +1077,26 @@ mod tests {
         assert_eq!(pipe_connection.op, Connector::Pipe);
         assert_simple_words(&pipe_connection.left, &["b"]);
         assert_simple_words(&pipe_connection.right, &["c"]);
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    use heraclitus_compiler::prelude::*;
+
+    #[test]
+    fn debug_dollar_hash_tokens() {
+        let source = "while [[ $# -gt 0 ]]; do\n  echo hi\ndone\n";
+        let mut compiler = Compiler::new("Bash", rules::get_rules());
+        compiler.set_separator(SeparatorMode::Automatic("\\".to_string()));
+        compiler.load(source);
+        let tokens = compiler.tokenize().expect("tokenize");
+        for (i, tok) in tokens.iter().enumerate() {
+            eprintln!("Token[{i}]: word={:?} pos={:?}", tok.word, tok.pos);
+        }
+        // Also try parsing
+        let result = parse(source, None);
+        eprintln!("Parse result: {:?}", result);
     }
 }

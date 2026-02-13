@@ -1,0 +1,3 @@
+cd("/tmp")
+sleep(5)
+trust touch("/tmp/file")

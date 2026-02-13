@@ -1,0 +1,1 @@
+trust mv("old", "new")

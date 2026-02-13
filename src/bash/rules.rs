@@ -15,12 +15,6 @@ pub fn get_rules() -> Rules {
         reg!(backticks as "backtick command" => {
             begin: "`",
             end: "`"
-        }),
-        reg!(comment as "comment" => {
-            begin: "#",
-            end: "\n",
-            allow_unclosed_region: true,
-            ignore_escaped: true
         })
     ];
     Rules::new(symbols, compounds, region)

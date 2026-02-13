@@ -81,7 +81,7 @@ pub(super) struct FunctionSig {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct RenderContext {
+pub(crate) struct RenderContext {
     var_aliases: HashMap<String, String>,
     declared_vars: HashSet<String>,
     functions: HashMap<String, FunctionSig>,

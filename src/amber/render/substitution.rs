@@ -1,3 +1,4 @@
+use crate::amber::builtins;
 use crate::bash::ast::*;
 use crate::bash::parser;
 
@@ -124,10 +125,13 @@ pub(super) fn parse_generic_command_substitution_expression(
     if let Ok(parsed) = parsed
         && parsed.statements.len() == 1
     {
-        return Some(command_literal_from_command(
-            parsed.statements.first()?,
-            ctx,
-        ));
+        let command = parsed.statements.first()?;
+        if let Command::Simple(simple) = command {
+            if let Some(builtin_expr) = builtins::render_builtin_expr(simple, ctx) {
+                return Some(builtin_expr);
+            }
+        }
+        return Some(command_literal_from_command(command, ctx));
     }
 
     Some(command_literal_from_shell(inner))

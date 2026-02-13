@@ -1,0 +1,3 @@
+trust rm("/tmp/test", true, true)
+trust rm("/tmp/single")
+trust rm("/tmp/recursive", true)
