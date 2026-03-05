@@ -180,5 +180,17 @@ fn normalize_stderr_line(line: &str) -> String {
 }
 
 fn should_compare_runtime_output(source: &str) -> bool {
+    if compare_only_mode_enabled() {
+        return false;
+    }
+
     !source.lines().any(|line| line.trim() == "### No execute")
+}
+
+fn compare_only_mode_enabled() -> bool {
+    let Ok(value) = std::env::var("TEST_COMPARE_ONLY") else {
+        return false;
+    };
+
+    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
 }
