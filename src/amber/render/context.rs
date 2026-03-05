@@ -171,8 +171,6 @@ impl RenderContext {
     }
 
     pub(super) fn merge_from_child(&mut self, child: Self) {
-        self.var_aliases.extend(child.var_aliases);
-        self.declared_vars.extend(child.declared_vars);
         self.functions.extend(child.functions);
 
         for (name, child_cursor) in child.function_hint_cursors {

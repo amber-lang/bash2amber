@@ -1,0 +1,10 @@
+let v = "a"
+if {
+    v == "a" {
+        let x = 1
+    }
+    v == "b" {
+        let x = 2
+    }
+}
+let x = 3
