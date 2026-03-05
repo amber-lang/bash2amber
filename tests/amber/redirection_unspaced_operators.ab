@@ -1,0 +1,3 @@
+trust $ echo hi > file $
+trust $ echo hi >> file $
+trust $ ls &> file $

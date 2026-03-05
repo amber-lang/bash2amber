@@ -1,1 +1,1 @@
-trust $ for (( i=0; i<MAX; i++ )); do echo \$i; done $
+trust $ for (( i=0; i < MAX; i++ )); do echo \$i; done $
