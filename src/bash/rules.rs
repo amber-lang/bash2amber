@@ -1,8 +1,18 @@
 use heraclitus_compiler::prelude::*;
 
 pub fn get_rules() -> Rules {
-    let symbols = vec![';', '|', '&'];
-    let compounds = vec![('&', '&'), ('|', '|')];
+    let symbols = vec![';', '|', '&', '<', '>'];
+    let compounds = vec![
+        ('&', '&'),
+        ('|', '|'),
+        ('>', '>'),
+        ('<', '<'),
+        ('<', '='),
+        ('>', '='),
+        ('&', '>'),
+        ('>', '&'),
+        ('<', '&'),
+    ];
     let region = reg![
         reg!(single_quote as "single quoted string" => {
             begin: "'",

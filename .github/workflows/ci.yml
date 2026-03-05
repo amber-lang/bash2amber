@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: swatinem/rust-cache@v2
+
+      - name: Install Amber CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc
+          bash -- <(curl -sL "https://github.com/amber-lang/amber/releases/latest/download/install.sh") --user
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          amber --version
+
+      - name: Build project
+        run: cargo build --locked --verbose
+
+      - name: Run tests
+        run: cargo test --locked --verbose
